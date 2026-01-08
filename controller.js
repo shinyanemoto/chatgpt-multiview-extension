@@ -7,11 +7,14 @@ let opLock = false;
 let opSeq = 0;
 let lastUpdates = [];
 let lastBringToFrontAt = 0;
+let recoverTimeoutId = null;
+let isMoving = false;
 const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
 const MIN_PARENT_SIZE = 120;
 const BRING_TO_FRONT_THROTTLE_MS = 300;
+const RECOVER_DEBOUNCE_MS = 700;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
@@ -27,6 +30,7 @@ async function init() {
     document.getElementById('btn-retile').addEventListener('click', () => tileWindows({ force: true }));
     document.getElementById('btn-reshow').addEventListener('click', () => reshowChildren('manual-reshow'));
     document.getElementById('btn-reopen').addEventListener('click', () => reopenChildren());
+    document.getElementById('btn-recover').addEventListener('click', () => recoverChildren('manual-recover'));
     document.getElementById('btn-reset').addEventListener('click', () => resetChildren());
     document.getElementById('layout-2x2').addEventListener('click', () => setLayout('2x2'));
     document.getElementById('layout-1-3').addEventListener('click', () => setLayout('1+3'));
@@ -140,12 +144,13 @@ async function tileWindows(options = {}) {
             return;
         }
 
+        const boundsChanged = parentBounds.left !== lastBounds.left ||
+            parentBounds.top !== lastBounds.top ||
+            parentBounds.width !== lastBounds.width ||
+            parentBounds.height !== lastBounds.height;
+
         // Check if moved or resized
-        if (!force &&
-            parentBounds.left === lastBounds.left &&
-            parentBounds.top === lastBounds.top &&
-            parentBounds.width === lastBounds.width &&
-            parentBounds.height === lastBounds.height) {
+        if (!force && !boundsChanged) {
             return;
         }
 
@@ -155,6 +160,11 @@ async function tileWindows(options = {}) {
             width: parentBounds.width,
             height: parentBounds.height
         };
+
+        if (boundsChanged) {
+            isMoving = true;
+            scheduleRecoverAfterStop();
+        }
 
         const usableWidth = parentBounds.width - (GAP * 3);
         const usableHeight = parentBounds.height - TOOLBAR_HEIGHT - (GAP * 3);
@@ -209,6 +219,18 @@ async function tileWindows(options = {}) {
     }
 }
 
+function scheduleRecoverAfterStop() {
+    if (recoverTimeoutId) {
+        clearTimeout(recoverTimeoutId);
+    }
+    recoverTimeoutId = setTimeout(() => {
+        recoverTimeoutId = null;
+        if (isMoving) {
+            recoverChildren('auto-recover');
+        }
+    }, RECOVER_DEBOUNCE_MS);
+}
+
 async function reshowChildren(reason) {
     if (opLock) return;
     opLock = true;
@@ -224,6 +246,69 @@ async function reshowChildren(reason) {
     console.log('reshowChildren tile', { seq, childIds: [...childIds] });
     await tileWindows({ force: true, bringToFront: false });
     console.log('reshowChildren end', { seq, childIds: [...childIds] });
+    opLock = false;
+}
+
+async function recoverChildren(reason) {
+    if (opLock) return;
+    opLock = true;
+    const seq = ++opSeq;
+    console.log('recover start', { seq, mode: reason });
+
+    const validatedIds = await validateChildIds();
+    console.log('recover validated childIds', { seq, childIds: [...validatedIds] });
+
+    if (validatedIds.length < 4) {
+        await reconcileChildren('recover');
+    }
+
+    await tileWindows({ force: true, bringToFront: false });
+    await focusChildrenSequentially('recover');
+
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const allWindows = await chrome.windows.getAll({ populate: false });
+    const existingIds = new Set(allWindows.map(win => win.id));
+    const availableChildIds = childIds.filter(id => existingIds.has(id));
+    const focusedChild = await getFocusedChildId();
+
+    const shouldReplace = availableChildIds.length !== 4 || !focusedChild;
+    const replacedIds = [];
+    const createdIds = [];
+
+    if (shouldReplace) {
+        for (const id of availableChildIds) {
+            if (focusedChild && id === focusedChild) {
+                continue;
+            }
+            try {
+                await chrome.windows.remove(id);
+                replacedIds.push(id);
+            } catch (e) {
+                // Ignore missing windows
+            }
+        }
+        const rebuildIds = focusedChild ? [focusedChild] : [];
+        while (rebuildIds.length < 4) {
+            try {
+                const id = await createChildWindow();
+                rebuildIds.push(id);
+                createdIds.push(id);
+            } catch (e) {
+                break;
+            }
+        }
+        childIds = rebuildIds.slice(0, 4);
+        await chrome.storage.local.set({ childIds });
+        await tileWindows({ force: true, bringToFront: false });
+    }
+
+    console.log('recover end', {
+        seq,
+        replacedIds: [...replacedIds],
+        createdIds: [...createdIds],
+        childIds: [...childIds]
+    });
+    isMoving = false;
     opLock = false;
 }
 
@@ -295,6 +380,27 @@ async function resetChildren() {
     await chrome.storage.local.set({ childIds });
     console.log('resetChildren end', { seq, childIds: [] });
     opLock = false;
+}
+
+async function focusChildrenSequentially(reason) {
+    const now = Date.now();
+    if (now - lastBringToFrontAt < BRING_TO_FRONT_THROTTLE_MS) {
+        return;
+    }
+    lastBringToFrontAt = now;
+
+    if (!childIds.length) {
+        return;
+    }
+
+    for (const id of childIds) {
+        try {
+            await chrome.windows.update(id, { focused: true });
+        } catch (e) {
+            // Ignore missing windows
+        }
+    }
+    console.log('recover focus attempted', { reason, childIds: [...childIds] });
 }
 async function focusLastChild(reason) {
     const now = Date.now();
