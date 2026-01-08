@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "ChatGPT Multi-View Controller",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "Control 4 ChatGPT windows in a tiled layout for maximum productivity.",
     "permissions": [
         "windows",
