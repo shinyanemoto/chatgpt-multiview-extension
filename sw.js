@@ -21,6 +21,7 @@ chrome.action.onClicked.addListener(async () => {
             const tab = await chrome.tabs.get(data.controllerTabId);
             await chrome.windows.update(tab.windowId, { focused: true });
             await chrome.tabs.update(tab.id, { active: true });
+            await chrome.storage.local.set({ controllerWindowId: tab.windowId });
             return;
         } catch (e) {
             // Controller tab doesn't exist anymore
@@ -32,7 +33,7 @@ chrome.action.onClicked.addListener(async () => {
         active: true
     });
 
-    await chrome.storage.local.set({ controllerTabId: tab.id });
+    await chrome.storage.local.set({ controllerTabId: tab.id, controllerWindowId: tab.windowId });
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -49,6 +50,21 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
     if (data.childIds && data.childIds.includes(windowId)) {
         const updatedChildIds = data.childIds.filter(id => id !== windowId);
         await chrome.storage.local.set({ childIds: updatedChildIds });
+    }
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    const data = await chrome.storage.local.get(['controllerTabId']);
+    if (activeInfo.tabId === data.controllerTabId) {
+        chrome.runtime.sendMessage({ type: 'bringChildrenToFront', reason: 'tab-activated' });
+    }
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+    const data = await chrome.storage.local.get(['controllerWindowId']);
+    if (windowId !== chrome.windows.WINDOW_ID_NONE &&
+        data.controllerWindowId === windowId) {
+        chrome.runtime.sendMessage({ type: 'bringChildrenToFront', reason: 'window-focused' });
     }
 });
 

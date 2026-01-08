@@ -2,17 +2,25 @@ let currentLayout = '2x2';
 let childIds = [];
 let lastBounds = { left: 0, top: 0, width: 0, height: 0 };
 let isUpdating = false;
+let lastUpdates = [];
+let lastBringToFrontAt = 0;
 const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
 const BRING_CHILDREN_TO_FRONT = true;
 const MIN_PARENT_SIZE = 120;
+const BRING_TO_FRONT_THROTTLE_MS = 300;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
     if (data.layout) {
         currentLayout = data.layout;
         updateLayoutButtons();
+    }
+
+    const currentWindow = await chrome.windows.getCurrent();
+    if (currentWindow && currentWindow.id) {
+        await chrome.storage.local.set({ controllerWindowId: currentWindow.id });
     }
 
     await reconcileChildren();
@@ -35,6 +43,12 @@ async function init() {
         const version = chrome.runtime.getManifest().version;
         versionLabel.textContent = `Version: ${version}`;
     }
+
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message && message.type === 'bringChildrenToFront') {
+            bringChildrenToFront(message.reason || 'runtime-message');
+        }
+    });
 }
 
 async function createChildWindow() {
@@ -164,6 +178,7 @@ async function tileWindows(force = false) {
             if (childIds[i]) {
                 try {
                     await chrome.windows.update(childIds[i], updates[i]);
+                    lastUpdates[i] = updates[i];
                 } catch (e) {
                     // If update fails, child might be closed
                     console.error("Failed to update child window", e);
@@ -172,17 +187,44 @@ async function tileWindows(force = false) {
         }
 
         if (BRING_CHILDREN_TO_FRONT && childIds.length > 0) {
-            try {
-                const topChildId = childIds[childIds.length - 1];
-                await chrome.windows.update(topChildId, { focused: true });
-            } catch (e) {
-                console.error("Failed to focus child window", e);
-            }
+            await bringChildrenToFront('tile');
         }
     } catch (e) {
         console.error("Error in tileWindows", e);
     } finally {
         isUpdating = false;
+    }
+}
+
+async function bringChildrenToFront(reason) {
+    const now = Date.now();
+    if (now - lastBringToFrontAt < BRING_TO_FRONT_THROTTLE_MS) {
+        return;
+    }
+    lastBringToFrontAt = now;
+
+    if (!childIds.length) {
+        return;
+    }
+
+    console.log('bringChildrenToFront triggered', { reason, childIds: [...childIds] });
+
+    const lastIndex = childIds.length - 1;
+    for (let i = 0; i < childIds.length; i++) {
+        const id = childIds[i];
+        const updateInfo = lastUpdates[i];
+        try {
+            if (updateInfo) {
+                await chrome.windows.update(id, updateInfo);
+            }
+            if (i === lastIndex) {
+                await chrome.windows.update(id, { focused: true });
+            } else {
+                await chrome.windows.update(id, { focused: false });
+            }
+        } catch (e) {
+            console.error("Failed to bring child window to front", e);
+        }
     }
 }
 
@@ -200,6 +242,8 @@ function getParentBounds() {
         height <= MIN_PARENT_SIZE) {
         return null;
     }
+
+    console.log('tileWindows called', { parentBounds: { left, top, width, height } });
 
     return { left, top, width, height };
 }
