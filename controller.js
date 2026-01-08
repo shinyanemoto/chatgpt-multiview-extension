@@ -3,16 +3,15 @@ let childIds = [];
 let lastBounds = { left: 0, top: 0, width: 0, height: 0 };
 let isUpdating = false;
 let isReconciling = false;
+let opLock = false;
+let opSeq = 0;
 let lastUpdates = [];
 let lastBringToFrontAt = 0;
-let reshowTimeoutId = null;
-let isMoving = false;
 const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
 const MIN_PARENT_SIZE = 120;
 const BRING_TO_FRONT_THROTTLE_MS = 300;
-const RESHOW_DEBOUNCE_MS = 800;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
@@ -28,6 +27,7 @@ async function init() {
     document.getElementById('btn-retile').addEventListener('click', () => tileWindows({ force: true }));
     document.getElementById('btn-reshow').addEventListener('click', () => reshowChildren('manual-reshow'));
     document.getElementById('btn-reopen').addEventListener('click', () => reopenChildren());
+    document.getElementById('btn-reset').addEventListener('click', () => resetChildren());
     document.getElementById('layout-2x2').addEventListener('click', () => setLayout('2x2'));
     document.getElementById('layout-1-3').addEventListener('click', () => setLayout('1+3'));
     document.getElementById('btn-close').addEventListener('click', async () => {
@@ -56,35 +56,32 @@ async function createChildWindow() {
 
 async function validateChildIds() {
     const data = await chrome.storage.local.get(['childIds']);
-    const existingIds = data.childIds || [];
-    const validatedIds = [];
-
-    // Check which children still exist
-    for (const id of existingIds) {
-        try {
-            await chrome.windows.get(id);
-            validatedIds.push(id);
-        } catch (e) {
-            // Doesn't exist
-        }
-    }
+    const existingIds = Array.isArray(data.childIds) ? data.childIds : [];
+    const allWindows = await chrome.windows.getAll({ populate: false });
+    const existingWindowIds = new Set(allWindows.map(win => win.id));
+    const validatedIds = existingIds.filter(id => existingWindowIds.has(id));
 
     childIds = validatedIds;
     await chrome.storage.local.set({ childIds });
     return validatedIds;
 }
 
-async function reconcileChildren() {
+async function reconcileChildren(mode = 'reconcile') {
     if (isReconciling) return;
     isReconciling = true;
 
+    const seq = ++opSeq;
+    console.log('reconcile start', { seq, mode });
     const validatedIds = await validateChildIds();
+    console.log('childIds after validate', { seq, validatedIds: [...validatedIds] });
 
     // Create missing children
+    const createdIds = [];
     while (validatedIds.length < 4) {
         try {
             const id = await createChildWindow();
             validatedIds.push(id);
+            createdIds.push(id);
         } catch (e) {
             break;
         }
@@ -92,6 +89,7 @@ async function reconcileChildren() {
 
     childIds = validatedIds;
     await chrome.storage.local.set({ childIds });
+    console.log('reconcile end', { seq, createdIds: [...createdIds], childIds: [...childIds] });
     isReconciling = false;
 }
 
@@ -122,15 +120,17 @@ async function tileWindows(options = {}) {
     const normalizedOptions = typeof options === 'boolean' ? { force: options } : options;
     const {
         force = false,
-        scheduleReshow = true,
         bringToFront = false
     } = normalizedOptions;
 
-    if (isUpdating) return;
+    if (opLock || isUpdating) return;
+    opLock = true;
+    const seq = ++opSeq;
     isUpdating = true;
 
     try {
-        await reconcileChildren();
+        console.log('reconcile start', { seq, mode: 'tile' });
+        await reconcileChildren('tile');
         if (childIds.length < 4) {
             return;
         }
@@ -140,13 +140,12 @@ async function tileWindows(options = {}) {
             return;
         }
 
-        const boundsChanged = parentBounds.left !== lastBounds.left ||
-            parentBounds.top !== lastBounds.top ||
-            parentBounds.width !== lastBounds.width ||
-            parentBounds.height !== lastBounds.height;
-
         // Check if moved or resized
-        if (!force && !boundsChanged) {
+        if (!force &&
+            parentBounds.left === lastBounds.left &&
+            parentBounds.top === lastBounds.top &&
+            parentBounds.width === lastBounds.width &&
+            parentBounds.height === lastBounds.height) {
             return;
         }
 
@@ -156,11 +155,6 @@ async function tileWindows(options = {}) {
             width: parentBounds.width,
             height: parentBounds.height
         };
-
-        if (boundsChanged && scheduleReshow) {
-            isMoving = true;
-            scheduleReshowAfterStop();
-        }
 
         const usableWidth = parentBounds.width - (GAP * 3);
         const usableHeight = parentBounds.height - TOOLBAR_HEIGHT - (GAP * 3);
@@ -211,82 +205,36 @@ async function tileWindows(options = {}) {
         console.error("Error in tileWindows", e);
     } finally {
         isUpdating = false;
+        opLock = false;
     }
-}
-
-function scheduleReshowAfterStop() {
-    if (reshowTimeoutId) {
-        clearTimeout(reshowTimeoutId);
-    }
-    reshowTimeoutId = setTimeout(() => {
-        reshowTimeoutId = null;
-        if (isMoving) {
-            reshowChildren('auto-reshow');
-        }
-    }, RESHOW_DEBOUNCE_MS);
 }
 
 async function reshowChildren(reason) {
+    if (opLock) return;
+    opLock = true;
+    const seq = ++opSeq;
+    console.log('reshowChildren start', { seq, mode: reason });
     const validatedIds = await validateChildIds();
-    console.log('reshowChildren triggered', { reason, validatedChildIds: [...validatedIds] });
+    console.log('childIds after validate', { seq, validatedIds: [...validatedIds] });
 
     if (validatedIds.length < 4) {
-        await reconcileChildren();
+        await reconcileChildren('reshow');
     }
 
-    console.log('reshowChildren tile start', { childIds: [...childIds] });
-    await tileWindows({ force: true, scheduleReshow: false, bringToFront: false });
-
-    await focusLastChild(reason);
-
-    await new Promise(resolve => setTimeout(resolve, 300));
-    const allWindows = await chrome.windows.getAll({ populate: false });
-    const existingIds = new Set(allWindows.map(win => win.id));
-    const availableChildIds = childIds.filter(id => existingIds.has(id));
-    const focusedChild = await getFocusedChildId();
-    const shouldReplace = availableChildIds.length !== 4 || !focusedChild;
-
-    console.log('reshowChildren replace check', {
-        shouldReplace,
-        availableChildIds: [...availableChildIds],
-        focusedChild
-    });
-
-    if (shouldReplace) {
-        const keepId = focusedChild || availableChildIds[availableChildIds.length - 1];
-        const idsToClose = availableChildIds.filter(id => id !== keepId);
-        for (const id of idsToClose) {
-            try {
-                await chrome.windows.remove(id);
-            } catch (e) {
-                // Ignore missing windows
-            }
-        }
-        const rebuiltIds = keepId ? [keepId] : [];
-        while (rebuiltIds.length < 4) {
-            try {
-                const id = await createChildWindow();
-                rebuiltIds.push(id);
-            } catch (e) {
-                break;
-            }
-        }
-        childIds = rebuiltIds;
-        await chrome.storage.local.set({ childIds });
-        await tileWindows({ force: true, scheduleReshow: false, bringToFront: false });
-        await focusLastChild('reshow-replace');
-    }
-
-    console.log('reshowChildren done', { childIds: [...childIds] });
-    isMoving = false;
+    console.log('reshowChildren tile', { seq, childIds: [...childIds] });
+    await tileWindows({ force: true, bringToFront: false });
+    console.log('reshowChildren end', { seq, childIds: [...childIds] });
+    opLock = false;
 }
 
 async function reopenChildren() {
-    const data = await chrome.storage.local.get(['childIds']);
-    const oldChildIds = data.childIds || [];
-    console.log('reopenChildren start', { oldChildIds: [...oldChildIds] });
+    if (opLock) return;
+    opLock = true;
+    const seq = ++opSeq;
+    const validatedIds = await validateChildIds();
+    console.log('reopenChildren start', { seq, oldChildIds: [...validatedIds] });
 
-    for (const id of oldChildIds) {
+    for (const id of validatedIds) {
         try {
             await chrome.windows.remove(id);
         } catch (e) {
@@ -309,11 +257,45 @@ async function reopenChildren() {
 
     childIds = newChildIds;
     await chrome.storage.local.set({ childIds });
-    await tileWindows({ force: true, scheduleReshow: false, bringToFront: false });
-    await focusLastChild('reopen');
-    console.log('reopenChildren done', { newChildIds: [...newChildIds] });
+
+    const postValidate = await validateChildIds();
+    const createdIds = [];
+    while (postValidate.length < 4) {
+        try {
+            const id = await createChildWindow();
+            postValidate.push(id);
+            createdIds.push(id);
+        } catch (e) {
+            break;
+        }
+    }
+    childIds = postValidate.slice(0, 4);
+    await chrome.storage.local.set({ childIds });
+    await tileWindows({ force: true, bringToFront: false });
+    console.log('reopenChildren end', { seq, newChildIds: [...childIds], createdIds: [...createdIds] });
+    opLock = false;
 }
 
+async function resetChildren() {
+    if (opLock) return;
+    opLock = true;
+    const seq = ++opSeq;
+    const validatedIds = await validateChildIds();
+    console.log('resetChildren start', { seq, childIds: [...validatedIds] });
+
+    for (const id of validatedIds) {
+        try {
+            await chrome.windows.remove(id);
+        } catch (e) {
+            // Ignore missing windows
+        }
+    }
+
+    childIds = [];
+    await chrome.storage.local.set({ childIds });
+    console.log('resetChildren end', { seq, childIds: [] });
+    opLock = false;
+}
 async function focusLastChild(reason) {
     const now = Date.now();
     if (now - lastBringToFrontAt < BRING_TO_FRONT_THROTTLE_MS) {
