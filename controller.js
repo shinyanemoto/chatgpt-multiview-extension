@@ -4,12 +4,14 @@ let lastBounds = { left: 0, top: 0, width: 0, height: 0 };
 let isUpdating = false;
 let lastUpdates = [];
 let lastBringToFrontAt = 0;
+let reshowTimeoutId = null;
+let isMoving = false;
 const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
-const BRING_CHILDREN_TO_FRONT = true;
 const MIN_PARENT_SIZE = 120;
 const BRING_TO_FRONT_THROTTLE_MS = 300;
+const RESHOW_DEBOUNCE_MS = 800;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
@@ -18,17 +20,13 @@ async function init() {
         updateLayoutButtons();
     }
 
-    const currentWindow = await chrome.windows.getCurrent();
-    if (currentWindow && currentWindow.id) {
-        await chrome.storage.local.set({ controllerWindowId: currentWindow.id });
-    }
-
-    await reconcileChildren();
-    await tileWindows(true);
+    await reshowChildren('initial');
     startPolling();
 
     document.getElementById('btn-refresh').addEventListener('click', refreshAll);
-    document.getElementById('btn-retile').addEventListener('click', () => tileWindows(true));
+    document.getElementById('btn-retile').addEventListener('click', () => tileWindows({ force: true }));
+    document.getElementById('btn-reshow').addEventListener('click', () => reshowChildren('manual-reshow'));
+    document.getElementById('btn-reopen').addEventListener('click', () => reopenChildren());
     document.getElementById('layout-2x2').addEventListener('click', () => setLayout('2x2'));
     document.getElementById('layout-1-3').addEventListener('click', () => setLayout('1+3'));
     document.getElementById('btn-close').addEventListener('click', async () => {
@@ -43,12 +41,6 @@ async function init() {
         const version = chrome.runtime.getManifest().version;
         versionLabel.textContent = `Version: ${version}`;
     }
-
-    chrome.runtime.onMessage.addListener((message) => {
-        if (message && message.type === 'bringChildrenToFront') {
-            bringChildrenToFront(message.reason || 'runtime-message');
-        }
-    });
 }
 
 async function createChildWindow() {
@@ -94,7 +86,7 @@ function setLayout(layout) {
     currentLayout = layout;
     chrome.storage.local.set({ layout });
     updateLayoutButtons();
-    tileWindows(true);
+    tileWindows({ force: true });
 }
 
 function updateLayoutButtons() {
@@ -113,7 +105,14 @@ async function refreshAll() {
     }
 }
 
-async function tileWindows(force = false) {
+async function tileWindows(options = {}) {
+    const normalizedOptions = typeof options === 'boolean' ? { force: options } : options;
+    const {
+        force = false,
+        scheduleReshow = true,
+        bringToFront = false
+    } = normalizedOptions;
+
     if (isUpdating) return;
     isUpdating = true;
 
@@ -128,12 +127,13 @@ async function tileWindows(force = false) {
             return;
         }
 
+        const boundsChanged = parentBounds.left !== lastBounds.left ||
+            parentBounds.top !== lastBounds.top ||
+            parentBounds.width !== lastBounds.width ||
+            parentBounds.height !== lastBounds.height;
+
         // Check if moved or resized
-        if (!force &&
-            parentBounds.left === lastBounds.left &&
-            parentBounds.top === lastBounds.top &&
-            parentBounds.width === lastBounds.width &&
-            parentBounds.height === lastBounds.height) {
+        if (!force && !boundsChanged) {
             return;
         }
 
@@ -143,6 +143,11 @@ async function tileWindows(force = false) {
             width: parentBounds.width,
             height: parentBounds.height
         };
+
+        if (boundsChanged && scheduleReshow) {
+            isMoving = true;
+            scheduleReshowAfterStop();
+        }
 
         const usableWidth = parentBounds.width - (GAP * 3);
         const usableHeight = parentBounds.height - TOOLBAR_HEIGHT - (GAP * 3);
@@ -186,14 +191,44 @@ async function tileWindows(force = false) {
             }
         }
 
-        if (BRING_CHILDREN_TO_FRONT && childIds.length > 0) {
-            await bringChildrenToFront('tile');
+        if (bringToFront && childIds.length > 0) {
+            await bringChildrenToFront(normalizedOptions.reason || 'reshow');
         }
     } catch (e) {
         console.error("Error in tileWindows", e);
     } finally {
         isUpdating = false;
     }
+}
+
+function scheduleReshowAfterStop() {
+    if (reshowTimeoutId) {
+        clearTimeout(reshowTimeoutId);
+    }
+    reshowTimeoutId = setTimeout(() => {
+        reshowTimeoutId = null;
+        if (isMoving) {
+            reshowChildren('auto-reshow');
+        }
+    }, RESHOW_DEBOUNCE_MS);
+}
+
+async function reshowChildren(reason) {
+    await reconcileChildren();
+    if (childIds.length < 4) {
+        return;
+    }
+    console.log('reshowChildren triggered', { reason, childIds: [...childIds] });
+    isMoving = false;
+    await tileWindows({ force: true, scheduleReshow: false, bringToFront: true, reason });
+}
+
+async function reopenChildren() {
+    try {
+        await chrome.runtime.sendMessage({ type: 'closeAllChildren' });
+    } catch (e) { }
+    await reconcileChildren();
+    await reshowChildren('reopen');
 }
 
 async function bringChildrenToFront(reason) {
