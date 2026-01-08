@@ -5,6 +5,7 @@ let isUpdating = false;
 const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
+const BRING_CHILDREN_TO_FRONT = true;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
@@ -82,28 +83,28 @@ async function tileWindows(force = false) {
     isUpdating = true;
 
     try {
-        const parent = await chrome.windows.getCurrent();
+        const parentBounds = getParentBounds();
 
         // Check if moved or resized
         if (!force &&
-            parent.left === lastBounds.left &&
-            parent.top === lastBounds.top &&
-            parent.width === lastBounds.width &&
-            parent.height === lastBounds.height) {
+            parentBounds.left === lastBounds.left &&
+            parentBounds.top === lastBounds.top &&
+            parentBounds.width === lastBounds.width &&
+            parentBounds.height === lastBounds.height) {
             return;
         }
 
         lastBounds = {
-            left: parent.left,
-            top: parent.top,
-            width: parent.width,
-            height: parent.height
+            left: parentBounds.left,
+            top: parentBounds.top,
+            width: parentBounds.width,
+            height: parentBounds.height
         };
 
-        const usableWidth = parent.width - (GAP * 3);
-        const usableHeight = parent.height - TOOLBAR_HEIGHT - (GAP * 3);
-        const startX = parent.left + GAP;
-        const startY = parent.top + TOOLBAR_HEIGHT + GAP;
+        const usableWidth = parentBounds.width - (GAP * 3);
+        const usableHeight = parentBounds.height - TOOLBAR_HEIGHT - (GAP * 3);
+        const startX = parentBounds.left + GAP;
+        const startY = parentBounds.top + TOOLBAR_HEIGHT + GAP;
 
         let updates = [];
 
@@ -140,11 +141,39 @@ async function tileWindows(force = false) {
                 }
             }
         }
+
+        if (BRING_CHILDREN_TO_FRONT && childIds.length > 0) {
+            try {
+                const topChildId = childIds[childIds.length - 1];
+                await chrome.windows.update(topChildId, { focused: true });
+            } catch (e) {
+                console.error("Failed to focus child window", e);
+            }
+        }
     } catch (e) {
         console.error("Error in tileWindows", e);
     } finally {
         isUpdating = false;
     }
+}
+
+function getParentBounds() {
+    const left = window.screenX + getHorizontalWindowInset();
+    const top = window.screenY + getVerticalWindowInset();
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    return { left, top, width, height };
+}
+
+function getHorizontalWindowInset() {
+    const inset = window.outerWidth - window.innerWidth;
+    return Math.max(0, Math.round(inset / 2));
+}
+
+function getVerticalWindowInset() {
+    const inset = window.outerHeight - window.innerHeight;
+    return Math.max(0, Math.round(inset));
 }
 
 function startPolling() {
