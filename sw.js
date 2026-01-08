@@ -1,11 +1,14 @@
 chrome.action.onClicked.addListener(async () => {
-    const data = await chrome.storage.local.get(['controllerTabId']);
+    const data = await chrome.storage.local.get(['controllerTabId', 'controllerWindowId']);
 
     if (data.controllerTabId) {
         try {
             const tab = await chrome.tabs.get(data.controllerTabId);
             await chrome.windows.update(tab.windowId, { focused: true });
             await chrome.tabs.update(tab.id, { active: true });
+            if (data.controllerWindowId !== tab.windowId) {
+                await chrome.storage.local.set({ controllerWindowId: tab.windowId });
+            }
             return;
         } catch (e) {
             // Controller tab doesn't exist anymore
@@ -17,13 +20,17 @@ chrome.action.onClicked.addListener(async () => {
         active: true
     });
 
-    await chrome.storage.local.set({ controllerTabId: tab.id });
+    await chrome.storage.local.set({ controllerTabId: tab.id, controllerWindowId: tab.windowId });
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-    const data = await chrome.storage.local.get(['controllerTabId', 'childIds']);
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+    const data = await chrome.storage.local.get(['controllerTabId', 'controllerWindowId', 'childIds']);
 
-    if (tabId === data.controllerTabId) {
+    const isControllerTab = tabId === data.controllerTabId;
+    const isSameWindow = data.controllerWindowId == null ||
+        removeInfo.windowId === data.controllerWindowId;
+
+    if (isControllerTab && isSameWindow) {
         if (data.childIds) {
             for (const id of data.childIds) {
                 try {
@@ -33,7 +40,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
                 }
             }
         }
-        await chrome.storage.local.remove(['controllerTabId', 'childIds']);
+        await chrome.storage.local.remove(['controllerTabId', 'controllerWindowId', 'childIds']);
     }
 });
 

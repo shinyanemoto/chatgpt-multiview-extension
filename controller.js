@@ -24,7 +24,7 @@ async function init() {
     document.getElementById('btn-close').addEventListener('click', () => window.close());
 }
 
-async function ensureChildren() {
+async function ensureChildren({ shouldTile = true } = {}) {
     const data = await chrome.storage.local.get(['childIds']);
     let existingIds = data.childIds || [];
     let validatedIds = [];
@@ -52,7 +52,9 @@ async function ensureChildren() {
 
     childIds = validatedIds;
     await chrome.storage.local.set({ childIds });
-    await tileWindows(true);
+    if (shouldTile) {
+        await tileWindows(true);
+    }
 }
 
 function setLayout(layout) {
@@ -83,7 +85,12 @@ async function tileWindows(force = false) {
     isUpdating = true;
 
     try {
+        await ensureChildren({ shouldTile: false });
+
         const parentBounds = getParentBounds();
+        if (!parentBounds) {
+            return;
+        }
 
         // Check if moved or resized
         if (!force &&
@@ -162,6 +169,15 @@ function getParentBounds() {
     const top = window.screenY + getVerticalWindowInset();
     const width = window.innerWidth;
     const height = window.innerHeight;
+
+    if (!Number.isFinite(left) ||
+        !Number.isFinite(top) ||
+        !Number.isFinite(width) ||
+        !Number.isFinite(height) ||
+        width <= 0 ||
+        height <= 0) {
+        return null;
+    }
 
     return { left, top, width, height };
 }
