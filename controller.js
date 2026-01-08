@@ -6,6 +6,7 @@ const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
 const BRING_CHILDREN_TO_FRONT = true;
+const MIN_PARENT_SIZE = 120;
 
 async function init() {
     const data = await chrome.storage.local.get(['layout', 'childIds']);
@@ -14,17 +15,39 @@ async function init() {
         updateLayoutButtons();
     }
 
-    await ensureChildren();
+    await reconcileChildren();
+    await tileWindows(true);
     startPolling();
 
     document.getElementById('btn-refresh').addEventListener('click', refreshAll);
     document.getElementById('btn-retile').addEventListener('click', () => tileWindows(true));
     document.getElementById('layout-2x2').addEventListener('click', () => setLayout('2x2'));
     document.getElementById('layout-1-3').addEventListener('click', () => setLayout('1+3'));
-    document.getElementById('btn-close').addEventListener('click', () => window.close());
+    document.getElementById('btn-close').addEventListener('click', async () => {
+        try {
+            await chrome.runtime.sendMessage({ type: 'closeAllChildren' });
+        } catch (e) { }
+        window.close();
+    });
+
+    const versionLabel = document.getElementById('version-label');
+    if (versionLabel) {
+        const version = chrome.runtime.getManifest().version;
+        versionLabel.textContent = `Version: ${version}`;
+    }
 }
 
-async function ensureChildren({ shouldTile = true } = {}) {
+async function createChildWindow() {
+    const win = await chrome.windows.create({
+        url: 'https://chatgpt.com/',
+        type: 'popup',
+        width: 400,
+        height: 400
+    });
+    return win.id;
+}
+
+async function reconcileChildren() {
     const data = await chrome.storage.local.get(['childIds']);
     let existingIds = data.childIds || [];
     let validatedIds = [];
@@ -41,20 +64,16 @@ async function ensureChildren({ shouldTile = true } = {}) {
 
     // Create missing children
     while (validatedIds.length < 4) {
-        const win = await chrome.windows.create({
-            url: 'https://chatgpt.com/',
-            type: 'popup',
-            width: 400,
-            height: 400
-        });
-        validatedIds.push(win.id);
+        try {
+            const id = await createChildWindow();
+            validatedIds.push(id);
+        } catch (e) {
+            break;
+        }
     }
 
     childIds = validatedIds;
     await chrome.storage.local.set({ childIds });
-    if (shouldTile) {
-        await tileWindows(true);
-    }
 }
 
 function setLayout(layout) {
@@ -85,7 +104,10 @@ async function tileWindows(force = false) {
     isUpdating = true;
 
     try {
-        await ensureChildren({ shouldTile: false });
+        await reconcileChildren();
+        if (childIds.length < 4) {
+            return;
+        }
 
         const parentBounds = getParentBounds();
         if (!parentBounds) {
@@ -174,8 +196,8 @@ function getParentBounds() {
         !Number.isFinite(top) ||
         !Number.isFinite(width) ||
         !Number.isFinite(height) ||
-        width <= 0 ||
-        height <= 0) {
+        width <= MIN_PARENT_SIZE ||
+        height <= MIN_PARENT_SIZE) {
         return null;
     }
 
