@@ -6,13 +6,31 @@ const TOOLBAR_HEIGHT = 50; // Should match CSS
 const GAP = 8;
 const POLL_INTERVAL = 200;
 const BRING_CHILDREN_TO_FRONT = true;
+const DEFAULT_TARGET_URL = 'https://chatgpt.com/';
+let targetUrl = DEFAULT_TARGET_URL;
 
 async function init() {
-    const data = await chrome.storage.local.get(['layout', 'childIds']);
+    const data = await chrome.storage.local.get(['layout', 'childIds', 'targetUrl']);
     if (data.layout) {
         currentLayout = data.layout;
         updateLayoutButtons();
     }
+
+    const normalizedTargetUrl = normalizeTargetUrl(data.targetUrl);
+    targetUrl = normalizedTargetUrl || DEFAULT_TARGET_URL;
+    if (data.targetUrl !== targetUrl) {
+        await chrome.storage.local.set({ targetUrl });
+    }
+
+    const urlInput = document.getElementById('target-url');
+    urlInput.value = targetUrl;
+    document.getElementById('btn-save-url').addEventListener('click', saveTargetUrl);
+    urlInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            saveTargetUrl();
+        }
+    });
 
     await ensureChildren();
     startPolling();
@@ -42,7 +60,7 @@ async function ensureChildren() {
     // Create missing children
     while (validatedIds.length < 4) {
         const win = await chrome.windows.create({
-            url: 'https://chatgpt.com/',
+            url: targetUrl,
             type: 'popup',
             width: 400,
             height: 400
@@ -75,6 +93,59 @@ async function refreshAll() {
                 chrome.tabs.reload(tabs[0].id);
             }
         } catch (e) { }
+    }
+}
+
+async function saveTargetUrl() {
+    const input = document.getElementById('target-url');
+    const rawValue = input.value.trim();
+    const normalized = normalizeTargetUrl(rawValue);
+
+    if (!normalized) {
+        input.value = targetUrl;
+        alert('Please enter a valid URL.');
+        return;
+    }
+
+    if (normalized === targetUrl) {
+        input.value = targetUrl;
+        return;
+    }
+
+    targetUrl = normalized;
+    input.value = targetUrl;
+    await chrome.storage.local.set({ targetUrl });
+    await retargetChildren();
+}
+
+function normalizeTargetUrl(rawValue) {
+    if (!rawValue) {
+        return DEFAULT_TARGET_URL;
+    }
+
+    const candidate = rawValue.match(/^https?:\/\//i)
+        ? rawValue
+        : `https://${rawValue}`;
+
+    try {
+        return new URL(candidate).href;
+    } catch (error) {
+        return null;
+    }
+}
+
+async function retargetChildren() {
+    for (const id of childIds) {
+        try {
+            const tabs = await chrome.tabs.query({ windowId: id });
+            if (tabs.length > 0) {
+                await chrome.tabs.update(tabs[0].id, { url: targetUrl });
+            } else {
+                await chrome.tabs.create({ windowId: id, url: targetUrl });
+            }
+        } catch (error) {
+            console.error('Failed to update child window URL', error);
+        }
     }
 }
 
