@@ -73,6 +73,13 @@ async function ensureChildren() {
     await tileWindows(true);
 }
 
+function handleChildIdsChange(newChildIds = []) {
+    childIds = newChildIds;
+    if (childIds.length < 4) {
+        ensureChildren();
+    }
+}
+
 function setLayout(layout) {
     currentLayout = layout;
     chrome.storage.local.set({ layout });
@@ -250,5 +257,13 @@ function getVerticalWindowInset() {
 function startPolling() {
     setInterval(tileWindows, POLL_INTERVAL);
 }
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes.childIds) {
+        return;
+    }
+
+    handleChildIdsChange(changes.childIds.newValue || []);
+});
 
 document.addEventListener('DOMContentLoaded', init);
